@@ -63,6 +63,7 @@ class Platform(Enum):
     WEBHOOK = "webhook"
     FEISHU = "feishu"
     WECOM = "wecom"
+    IMESSAGE = "imessage"
 
 
 @dataclass
@@ -285,6 +286,8 @@ class GatewayConfig:
                 connected.append(platform)
             # WeCom uses extra dict for bot credentials
             elif platform == Platform.WECOM and config.extra.get("bot_id"):
+                connected.append(platform)
+            elif platform == Platform.IMESSAGE and config.extra.get("server_url"):
                 connected.append(platform)
         return connected
     
@@ -889,6 +892,25 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
                 platform=Platform.WECOM,
                 chat_id=wecom_home,
                 name=os.getenv("WECOM_HOME_CHANNEL_NAME", "Home"),
+            )
+
+    # iMessage (via BlueBubbles)
+    bb_server_url = os.getenv("BLUEBUBBLES_SERVER_URL")
+    bb_password = os.getenv("BLUEBUBBLES_PASSWORD")
+    if bb_server_url and bb_password:
+        if Platform.IMESSAGE not in config.platforms:
+            config.platforms[Platform.IMESSAGE] = PlatformConfig()
+        config.platforms[Platform.IMESSAGE].enabled = True
+        config.platforms[Platform.IMESSAGE].extra.update({
+            "server_url": bb_server_url,
+            "password": bb_password,
+        })
+        imessage_home = os.getenv("IMESSAGE_HOME_CHANNEL")
+        if imessage_home:
+            config.platforms[Platform.IMESSAGE].home_channel = HomeChannel(
+                platform=Platform.IMESSAGE,
+                chat_id=imessage_home,
+                name=os.getenv("IMESSAGE_HOME_CHANNEL_NAME", "Home"),
             )
 
     # Session settings

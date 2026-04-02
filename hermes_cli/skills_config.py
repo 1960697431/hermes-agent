@@ -30,6 +30,7 @@ PLATFORMS = {
     "dingtalk": "💬 DingTalk",
     "feishu": "🪽 Feishu",
     "wecom": "💬 WeCom",
+    "imessage": "iMessage",
 }
 
 # ─── Config Helpers ───────────────────────────────────────────────────────────

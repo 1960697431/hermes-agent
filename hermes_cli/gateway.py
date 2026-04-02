@@ -1403,6 +1403,29 @@ _PLATFORMS = [
              "help": "Chat ID for scheduled results and notifications."},
         ],
     },
+    {
+        "key": "imessage",
+        "label": "iMessage",
+        "emoji": "💬",
+        "token_var": None,
+        "setup_instructions": [
+            "1. Install BlueBubbles Server on your Mac: https://bluebubbles.app/install",
+            "2. Open BlueBubbles → Settings → Enable the Web API",
+            "3. Note the server URL (e.g. http://localhost:1234) and password",
+            "4. Make sure iMessage is signed in on this Mac",
+        ],
+        "vars": [
+            {"name": "BLUEBUBBLES_SERVER_URL", "prompt": "BlueBubbles server URL", "password": False,
+             "help": "The URL of your BlueBubbles Server (e.g. http://localhost:1234)."},
+            {"name": "BLUEBUBBLES_PASSWORD", "prompt": "BlueBubbles password", "password": True,
+             "help": "The password set in BlueBubbles Server settings."},
+            {"name": "IMESSAGE_ALLOWED_USERS", "prompt": "Allowed phone numbers/emails (comma-separated)", "password": False,
+             "is_allowlist": True,
+             "help": "Phone numbers or emails allowed to interact (e.g. +8613800138000)."},
+            {"name": "IMESSAGE_HOME_CHANNEL", "prompt": "Home chat GUID (for cron delivery, or empty to set later with /set-home)", "password": False,
+             "help": "Chat GUID for scheduled results and notifications (e.g. iMessage;-;+8613800138000)."},
+        ],
+    },
 ]
 
 
@@ -1413,6 +1436,18 @@ def _platform_status(platform: dict) -> str:
     simple_term_menu items (ANSI codes break width calculation).
     """
     token_var = platform["token_var"]
+    # iMessage and other platforms with token_var=None use custom status logic
+    if token_var is None:
+        key = platform.get("key", "")
+        if key == "imessage":
+            server = get_env_value("BLUEBUBBLES_SERVER_URL")
+            password = get_env_value("BLUEBUBBLES_PASSWORD")
+            if server and password:
+                return "configured"
+            if server or password:
+                return "partially configured"
+            return "not configured"
+        return "not configured"
     val = get_env_value(token_var)
     if token_var == "WHATSAPP_ENABLED":
         if val and val.lower() == "true":
@@ -1497,7 +1532,11 @@ def _setup_standard_platform(platform: dict):
         for line in instructions:
             print_info(f"  {line}")
 
-    existing_token = get_env_value(token_var)
+    existing_token = get_env_value(token_var) if token_var else None
+    if not existing_token and not token_var:
+        # Platforms without a single token_var: check first var instead
+        first_var = platform["vars"][0]["name"] if platform.get("vars") else None
+        existing_token = get_env_value(first_var) if first_var else None
     if existing_token:
         print()
         print_success(f"{label} is already configured.")
@@ -1811,8 +1850,10 @@ def gateway_setup():
     any_configured = any(
         bool(get_env_value(p["token_var"]))
         for p in _PLATFORMS
-        if p["key"] != "whatsapp"
-    ) or (get_env_value("WHATSAPP_ENABLED") or "").lower() == "true"
+        if p["key"] != "whatsapp" and p["token_var"] is not None
+    ) or (get_env_value("WHATSAPP_ENABLED") or "").lower() == "true" or (
+        get_env_value("BLUEBUBBLES_SERVER_URL") and get_env_value("BLUEBUBBLES_PASSWORD")
+    )
 
     if any_configured:
         print()

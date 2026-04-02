@@ -263,6 +263,13 @@ PLATFORM_HINTS = {
         "only — no markdown, no formatting. SMS messages are limited to ~1600 "
         "characters, so be brief and direct."
     ),
+    "imessage": (
+        "You are on iMessage, Apple's messaging platform. "
+        "iMessage supports rich text but not markdown — use plain text formatting. "
+        "You can send images, videos, voice messages, and file attachments natively. "
+        "Tapback reactions (love, like, dislike, laugh, emphasize, question) are available. "
+        "Keep responses conversational and concise, as users expect chat-style interaction."
+    ),
 }
 
 CONTEXT_FILE_MAX_CHARS = 20_000

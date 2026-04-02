@@ -131,6 +131,7 @@ def _handle_send(args):
         "dingtalk": Platform.DINGTALK,
         "feishu": Platform.FEISHU,
         "wecom": Platform.WECOM,
+        "imessage": Platform.IMESSAGE,
         "email": Platform.EMAIL,
         "sms": Platform.SMS,
     }
@@ -371,6 +372,8 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             result = await _send_feishu(pconfig, chat_id, chunk, thread_id=thread_id)
         elif platform == Platform.WECOM:
             result = await _send_wecom(pconfig.extra, chat_id, chunk)
+        elif platform == Platform.IMESSAGE:
+            result = await _send_imessage(pconfig.extra, chat_id, chunk)
         else:
             result = {"error": f"Direct sending not yet implemented for {platform.value}"}
 
@@ -879,6 +882,34 @@ async def _send_feishu(pconfig, chat_id, message, media_files=None, thread_id=No
         }
     except Exception as e:
         return {"error": f"Feishu send failed: {e}"}
+
+
+async def _send_imessage(extra: dict, chat_id: str, message: str) -> dict:
+    """Send a message via BlueBubbles REST API (for cron/send_message tool)."""
+    import httpx
+    import uuid as _uuid
+
+    server_url = extra.get("server_url", "").rstrip("/")
+    password = extra.get("password", "")
+    if not server_url or not password:
+        return {"error": "BlueBubbles server_url or password not configured"}
+
+    url = f"{server_url}/api/v1/message/text?password={password}"
+    payload = {
+        "chatGuid": chat_id,
+        "tempGuid": _uuid.uuid4().hex,
+        "message": message,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(url, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("status") == 200:
+                return {"success": True, "messageId": data.get("data", {}).get("guid")}
+            return {"error": data.get("message", "Unknown error")}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 def _check_send_message():
