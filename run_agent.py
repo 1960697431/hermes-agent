@@ -6433,9 +6433,11 @@ class AIAgent:
                 except Exception:
                     pass
 
+        # Strip think blocks and whitespace from content for clean output
+        _content = self._strip_think_blocks(assistant_message.content or "").strip()
         msg = {
             "role": "assistant",
-            "content": assistant_message.content or "",
+            "content": _content,
             "reasoning": reasoning_text,
             "finish_reason": finish_reason,
         }
