@@ -54,7 +54,7 @@ _TAPBACK_REMOVED = {
 }
 
 # Webhook event types that carry user messages
-_MESSAGE_EVENTS = {"new-message", "message", "updated-message"}
+_MESSAGE_EVENTS = {"new-message", "message"}
 
 # Log redaction patterns
 _PHONE_RE = re.compile(r"\+?\d{7,15}")
@@ -135,7 +135,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
 
     def _api_url(self, path: str) -> str:
         sep = "&" if "?" in path else "?"
-        return f"{self.server_url}{path}{sep}password={quote(self.password, safe='')}"
+        return f"{self.server_url}{path}{sep}password={quote(self.password, safe='=')}"
 
     async def _api_get(self, path: str) -> Dict[str, Any]:
         assert self.client is not None
@@ -221,7 +221,10 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         """Compute the external webhook URL for BlueBubbles registration."""
         host = self.webhook_host
         if host in ("0.0.0.0", "127.0.0.1", "localhost", "::"):
-            host = "localhost"
+            # Keep original host - don't change 127.0.0.1 to localhost for exact matching
+            pass
+        else:
+            host = host
         return f"http://{host}:{self.webhook_port}{self.webhook_path}"
 
     async def _find_registered_webhooks(self, url: str) -> list:
@@ -257,7 +260,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
 
         payload = {
             "url": webhook_url,
-            "events": ["new-message", "updated-message", "message"],
+            "events": ["new-message", "updated-message"],
         }
 
         try:
@@ -831,6 +834,29 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             att_guid = att.get("guid", "")
             if not att_guid:
                 continue
+            # Check if BlueBubbles already provides a direct URL
+            direct_url = (
+                att.get("url") 
+                or att.get("downloadUrl") 
+                or att.get("directUrl")
+            )
+            if direct_url:
+                # Use direct URL from BlueBubbles, no need to download
+                mime = (att.get("mimeType") or "").lower()
+                media_urls.append(direct_url)
+                media_types.append(mime)
+                if mime.startswith("image/"):
+                    msg_type = MessageType.PHOTO
+                elif mime.startswith("audio/") or (att.get("uti") or "").endswith(
+                    "caf"
+                ):
+                    msg_type = MessageType.VOICE
+                elif mime.startswith("video/"):
+                    msg_type = MessageType.VIDEO
+                else:
+                    msg_type = MessageType.DOCUMENT
+                continue
+            # Fallback: download to cache if no direct URL available
             cached = await self._download_attachment(att_guid, att)
             if cached:
                 mime = (att.get("mimeType") or "").lower()
