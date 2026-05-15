@@ -123,6 +123,16 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         )
         if not str(self.webhook_path).startswith("/"):
             self.webhook_path = f"/{self.webhook_path}"
+        raw_events = extra.get("webhook_events") or os.getenv(
+            "BLUEBUBBLES_WEBHOOK_EVENTS", "new-message"
+        )
+        if isinstance(raw_events, str):
+            events = [e.strip() for e in raw_events.split(",") if e.strip()]
+        elif isinstance(raw_events, list):
+            events = [str(e).strip() for e in raw_events if str(e).strip()]
+        else:
+            events = []
+        self.webhook_events = events or ["new-message"]
         self.send_read_receipts = bool(extra.get("send_read_receipts", True))
         self.client: Optional[httpx.AsyncClient] = None
         self._runner = None
@@ -207,9 +217,55 @@ class BlueBubblesAdapter(BasePlatformAdapter):
 
         return True
 
+    async def connect_outbound_only(self) -> bool:
+        """Connect enough to send messages without binding the inbound webhook.
+
+        Standalone callers such as ``send_message`` and cron delivery only need
+        BlueBubbles' REST API. Calling ``connect()`` there also starts the
+        webhook listener, which conflicts with the already-running gateway on
+        127.0.0.1:8645 and raises ``address already in use``. This lightweight
+        path validates the server and initializes the HTTP client/feature flags
+        but deliberately does not start aiohttp or register/unregister webhooks.
+        """
+        if not self.server_url or not self.password:
+            logger.error(
+                "[bluebubbles] BLUEBUBBLES_SERVER_URL and BLUEBUBBLES_PASSWORD are required"
+            )
+            return False
+
+        from gateway.platforms._http_client_limits import platform_httpx_limits
+
+        self.client = httpx.AsyncClient(timeout=30.0, limits=platform_httpx_limits())
+        try:
+            await self._api_get("/api/v1/ping")
+            info = await self._api_get("/api/v1/server/info")
+            server_data = (info or {}).get("data", {})
+            self._private_api_enabled = bool(server_data.get("private_api"))
+            self._helper_connected = bool(server_data.get("helper_connected"))
+            logger.info(
+                "[bluebubbles] outbound-only connected to %s (private_api=%s, helper=%s)",
+                self.server_url,
+                self._private_api_enabled,
+                self._helper_connected,
+            )
+            self._mark_connected()
+            return True
+        except Exception as exc:
+            logger.error(
+                "[bluebubbles] cannot reach server at %s: %s", self.server_url, exc
+            )
+            if self.client:
+                await self.client.aclose()
+                self.client = None
+            return False
+
     async def disconnect(self) -> None:
-        # Unregister webhook before cleaning up
-        await self._unregister_webhook()
+        # Only adapters that actually started a webhook listener should
+        # unregister webhooks. Outbound-only instances used by cron/send_message
+        # share the same URL as the live gateway; unregistering from them would
+        # break inbound iMessage delivery for the gateway.
+        if self._runner:
+            await self._unregister_webhook()
 
         if self.client:
             await self.client.aclose()
@@ -223,8 +279,8 @@ class BlueBubblesAdapter(BasePlatformAdapter):
     def _webhook_url(self) -> str:
         """Compute the external webhook URL for BlueBubbles registration."""
         host = self.webhook_host
-        if host in {"0.0.0.0", "127.0.0.1", "localhost", "::"}:
-            host = "localhost"
+        if host in {"0.0.0.0", "::", "localhost"}:
+            host = "127.0.0.1"
         return f"http://{host}:{self.webhook_port}{self.webhook_path}"
 
     @property
@@ -275,7 +331,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
 
         payload = {
             "url": webhook_url,
-            "events": ["new-message", "updated-message"],
+            "events": self.webhook_events,
         }
 
         try:
@@ -411,16 +467,14 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         text = self.format_message(content)
         if not text:
             return SendResult(success=False, error="BlueBubbles send requires text")
-        # Split on paragraph breaks first (double newlines) so each thought
-        # becomes its own iMessage bubble, then truncate any that are still
-        # too long.
-        paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
+        # Keep paragraph breaks inside a single iMessage bubble.  OpenClaw sends
+        # one outbound text payload and only chunks by length; splitting on
+        # double newlines makes long answers arrive as many tiny bubbles.
         chunks: List[str] = []
-        for para in (paragraphs or [text]):
-            if len(para) <= self.MAX_MESSAGE_LENGTH:
-                chunks.append(para)
-            else:
-                chunks.extend(self.truncate_message(para, max_length=self.MAX_MESSAGE_LENGTH))
+        if len(text) <= self.MAX_MESSAGE_LENGTH:
+            chunks.append(text)
+        else:
+            chunks.extend(self.truncate_message(text, max_length=self.MAX_MESSAGE_LENGTH))
         last = SendResult(success=True)
         for chunk in chunks:
             guid = await self._resolve_chat_guid(chat_id)
@@ -934,4 +988,3 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             asyncio.create_task(self.mark_read(session_chat_id))
 
         return web.Response(text="ok")
-
