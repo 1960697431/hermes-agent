@@ -467,9 +467,10 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         text = self.format_message(content)
         if not text:
             return SendResult(success=False, error="BlueBubbles send requires text")
-        # Keep paragraph breaks inside a single iMessage bubble.  OpenClaw sends
-        # one outbound text payload and only chunks by length; splitting on
-        # double newlines makes long answers arrive as many tiny bubbles.
+        # Cherry/iMessage UX: allow the agent to write normal paragraphs, but
+        # collapse blank-line paragraph separators into single newlines before
+        # sending. This keeps one iMessage bubble while avoiding wall-of-text.
+        text = re.sub(r"\n\s*\n+", "\n", text).strip()
         chunks: List[str] = []
         if len(text) <= self.MAX_MESSAGE_LENGTH:
             chunks.append(text)
