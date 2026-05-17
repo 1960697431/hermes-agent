@@ -607,6 +607,14 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                             raise
                         if send_result and not getattr(send_result, "success", True):
                             err = getattr(send_result, "error", "unknown")
+                            if platform_name.lower() == "bluebubbles":
+                                # BlueBubbles may create the outgoing iMessage but return an
+                                # empty failure/timeout. Do not fallback to standalone, or cron
+                                # notifications can be delivered twice.
+                                msg = f"live adapter send to {platform_name}:{chat_id} failed ({err}); not falling back to avoid duplicate iMessage"
+                                logger.warning("Job '%s': %s", job["id"], msg)
+                                delivery_errors.append(msg)
+                                continue
                             logger.warning(
                                 "Job '%s': live adapter send to %s:%s failed (%s), falling back to standalone",
                                 job["id"], platform_name, chat_id, err,
@@ -629,6 +637,11 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                     logger.info("Job '%s': delivered to %s:%s via live adapter", job["id"], platform_name, chat_id)
                     delivered = True
             except Exception as e:
+                if platform_name.lower() == "bluebubbles":
+                    msg = f"live adapter delivery to {platform_name}:{chat_id} failed ({e}); not falling back to avoid duplicate iMessage"
+                    logger.warning("Job '%s': %s", job["id"], msg)
+                    delivery_errors.append(msg)
+                    continue
                 logger.warning(
                     "Job '%s': live adapter delivery to %s:%s failed (%s), falling back to standalone",
                     job["id"], platform_name, chat_id, e,

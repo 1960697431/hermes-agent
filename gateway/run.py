@@ -14686,6 +14686,16 @@ class GatewayRunner:
             if not progress_queue or not _run_still_current():
                 return
 
+            # Suppress transient model retry/rate-limit lifecycle statuses. They are
+            # internal retry state, not user-facing iMessage content.
+            _message_text = str(preview or kwargs.get("message") or "")
+            if event_type == "lifecycle" and (
+                _message_text.startswith("⏳ Retrying in ")
+                or _message_text.startswith("⏱️ Rate limited. Waiting ")
+            ):
+                logger.debug("suppressing transient lifecycle status (%s): %s", event_type, _message_text)
+                return
+
             # First-touch onboarding: the first time a tool takes longer than
             # _LONG_TOOL_THRESHOLD_S during a run that's streaming every tool
             # (progress_mode == "all"), append a one-time hint suggesting
