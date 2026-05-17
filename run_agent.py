@@ -2882,7 +2882,8 @@ class AIAgent:
         interrupt the retry/fallback logic.
         """
         try:
-            self._vprint(f"{self.log_prefix}{message}", force=True)
+            if not self._hide_transient_api_retry_output(message):
+                self._vprint(f"{self.log_prefix}{message}", force=True)
         except Exception:
             pass
         if self.status_callback:
@@ -2890,6 +2891,18 @@ class AIAgent:
                 self.status_callback("lifecycle", message)
             except Exception:
                 logger.debug("status_callback error in _emit_status", exc_info=True)
+
+    @staticmethod
+    def _hide_transient_api_retry_output(message: str = "") -> bool:
+        raw = os.getenv("HERMES_HIDE_TRANSIENT_API_RETRIES", "")
+        if str(raw).strip().lower() not in {"1", "true", "yes", "on"}:
+            return False
+        text = str(message or "")
+        return (
+            not text
+            or text.startswith("⏳ Retrying in ")
+            or text.startswith("⏱️ Rate limited. Waiting ")
+        )
 
     def _emit_warning(self, message: str) -> None:
         """Emit a user-visible warning through the same status plumbing.
@@ -13716,16 +13729,19 @@ class AIAgent:
                     _base = getattr(self, "base_url", "unknown")
                     _model = getattr(self, "model", "unknown")
                     _status_code_str = f" [HTTP {status_code}]" if status_code else ""
-                    self._vprint(f"{self.log_prefix}⚠️  API call failed (attempt {retry_count}/{max_retries}): {error_type}{_status_code_str}", force=True)
-                    self._vprint(f"{self.log_prefix}   🔌 Provider: {_provider}  Model: {_model}", force=True)
-                    self._vprint(f"{self.log_prefix}   🌐 Endpoint: {_base}", force=True)
-                    self._vprint(f"{self.log_prefix}   📝 Error: {_error_summary}", force=True)
+                    _hide_retry_cli_output = self._hide_transient_api_retry_output()
+                    if not _hide_retry_cli_output:
+                        self._vprint(f"{self.log_prefix}⚠️  API call failed (attempt {retry_count}/{max_retries}): {error_type}{_status_code_str}", force=True)
+                        self._vprint(f"{self.log_prefix}   🔌 Provider: {_provider}  Model: {_model}", force=True)
+                        self._vprint(f"{self.log_prefix}   🌐 Endpoint: {_base}", force=True)
+                        self._vprint(f"{self.log_prefix}   📝 Error: {_error_summary}", force=True)
                     if status_code and status_code < 500:
                         _err_body = getattr(api_error, "body", None)
                         _err_body_str = str(_err_body)[:300] if _err_body else None
-                        if _err_body_str:
+                        if _err_body_str and not _hide_retry_cli_output:
                             self._vprint(f"{self.log_prefix}   📋 Details: {_err_body_str}", force=True)
-                    self._vprint(f"{self.log_prefix}   ⏱️  Elapsed: {elapsed_time:.2f}s  Context: {len(api_messages)} msgs, ~{approx_tokens:,} tokens")
+                    if not _hide_retry_cli_output:
+                        self._vprint(f"{self.log_prefix}   ⏱️  Elapsed: {elapsed_time:.2f}s  Context: {len(api_messages)} msgs, ~{approx_tokens:,} tokens")
 
                     # Actionable hint for OpenRouter "no tool endpoints" error.
                     # This fires regardless of whether fallback succeeds — the

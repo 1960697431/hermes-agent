@@ -343,30 +343,44 @@ class CuaDriverBackend(ComputerUseBackend):
         Maps hermes `capture(mode, app)` → cua-driver `list_windows` +
         `get_window_state` (ax/som) or `screenshot` (vision).
         """
-        # Step 1: enumerate on-screen windows to find target pid/window_id.
+        # Step 1: enumerate windows to find target pid/window_id.
+        # Prefer on-screen windows, but on background gateway sessions macOS may
+        # report zero on-screen windows even though AX/window state is still
+        # addressable. Fall back to all layer-0 windows so computer_use remains
+        # usable from iMessage/LaunchAgent contexts.
         lw_out = self._session.call_tool("list_windows", {"on_screen_only": True})
 
-        # Prefer structuredContent.windows (MCP 2024-11-05+); fall back to
-        # text-line parsing for older cua-driver builds.
-        sc = lw_out.get("structuredContent") or {}
-        raw_windows = sc.get("windows") if sc else None
-        if raw_windows:
-            windows = [
-                {
-                    "app_name": w.get("app_name", ""),
-                    "pid": int(w["pid"]),
-                    "window_id": int(w["window_id"]),
-                    "off_screen": not w.get("is_on_screen", True),
-                    "title": w.get("title", ""),
-                    "z_index": w.get("z_index", 0),
-                }
-                for w in raw_windows
-            ]
-            # Sort by z_index descending (lowest z_index = frontmost on macOS).
-            windows.sort(key=lambda w: w["z_index"])
-        else:
-            raw_text = lw_out["data"] if isinstance(lw_out["data"], str) else ""
-            windows = _parse_windows_from_text(raw_text)
+        def _windows_from_call(out: Dict[str, Any]) -> List[Dict[str, Any]]:
+            # Prefer structuredContent.windows (MCP 2024-11-05+); fall back to
+            # JSON text/dict data for newer cua-driver CLI/MCP shapes, then to
+            # text-line parsing for older cua-driver builds.
+            sc = out.get("structuredContent") or {}
+            raw_windows = sc.get("windows") if sc else None
+            if raw_windows is None and isinstance(out.get("data"), dict):
+                raw_windows = out["data"].get("windows")
+            if raw_windows:
+                parsed = [
+                    {
+                        "app_name": w.get("app_name", ""),
+                        "pid": int(w["pid"]),
+                        "window_id": int(w["window_id"]),
+                        "off_screen": not w.get("is_on_screen", True),
+                        "title": w.get("title", ""),
+                        "z_index": w.get("z_index", 0),
+                        "width": (w.get("bounds") or {}).get("width", 0),
+                        "height": (w.get("bounds") or {}).get("height", 0),
+                    }
+                    for w in raw_windows
+                ]
+                parsed.sort(key=lambda w: w["z_index"])
+                return parsed
+            raw_text = out["data"] if isinstance(out.get("data"), str) else ""
+            return _parse_windows_from_text(raw_text)
+
+        windows = _windows_from_call(lw_out)
+        if not windows:
+            lw_out = self._session.call_tool("list_windows", {"on_screen_only": False})
+            windows = _windows_from_call(lw_out)
 
         if not windows:
             return CaptureResult(mode=mode, width=0, height=0, png_b64=None,
@@ -405,17 +419,22 @@ class CuaDriverBackend(ComputerUseBackend):
                 "get_window_state",
                 {"pid": self._active_pid, "window_id": self._active_window_id},
             )
-            text = gws_out["data"] if isinstance(gws_out["data"], str) else ""
-            summary, tree = _split_tree_text(text)
+            data = gws_out.get("data")
+            if isinstance(data, dict):
+                tree = data.get("tree_markdown") or ""
+                summary = f"{data.get('name', app_name)} — {data.get('element_count', 0)} elements"
+                width = int(data.get("screenshot_width") or 0)
+                height = int(data.get("screenshot_height") or 0)
+            else:
+                text = data if isinstance(data, str) else ""
+                summary, tree = _split_tree_text(text)
 
             # Parse element count from summary e.g. "✅ AppName — 42 elements, turn 3..."
             m = re.search(r'(\d+)\s+elements?', summary)
-            if tree and not gws_out["images"]:
-                # ax mode — no screenshot
+            if tree:
                 elements = _parse_elements_from_tree(tree)
-            elif gws_out["images"]:
+            if gws_out["images"]:
                 png_b64 = gws_out["images"][0]
-                elements = _parse_elements_from_tree(tree)
 
             # Extract window title from the AX tree first AXWindow line.
             wt = re.search(r'AXWindow\s+"([^"]+)"', tree)

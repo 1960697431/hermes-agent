@@ -596,6 +596,18 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                         raise
                     if send_result and not getattr(send_result, "success", True):
                         err = getattr(send_result, "error", "unknown")
+                        if platform_name.lower() == "bluebubbles":
+                            # BlueBubbles/iMessage can report a failure after the REST
+                            # call already created the outgoing message. Retrying through
+                            # the standalone path sends the same cron result a second time.
+                            # Treat the live-adapter attempt as terminal for BlueBubbles;
+                            # surface the error but never fallback/re-send.
+                            msg = f"live adapter delivery to {platform_name}:{chat_id} failed: {err}"
+                            logger.warning("Job '%s': %s; not falling back to avoid duplicate iMessage", job["id"], msg)
+                            delivery_errors.append(msg)
+                            delivered = True
+                            adapter_ok = False
+                            break
                         logger.warning(
                             "Job '%s': live adapter send to %s:%s failed (%s), falling back to standalone",
                             job["id"], platform_name, chat_id, err,
@@ -618,10 +630,18 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                     logger.info("Job '%s': delivered to %s:%s via live adapter", job["id"], platform_name, chat_id)
                     delivered = True
             except Exception as e:
-                logger.warning(
-                    "Job '%s': live adapter delivery to %s:%s failed (%s), falling back to standalone",
-                    job["id"], platform_name, chat_id, e,
-                )
+                if platform_name.lower() == "bluebubbles":
+                    # Avoid double iMessage delivery: BlueBubbles failures can be
+                    # raised after the message was already accepted/sent.
+                    msg = f"live adapter delivery to {platform_name}:{chat_id} failed: {e}"
+                    logger.warning("Job '%s': %s; not falling back to avoid duplicate iMessage", job["id"], msg)
+                    delivery_errors.append(msg)
+                    delivered = True
+                else:
+                    logger.warning(
+                        "Job '%s': live adapter delivery to %s:%s failed (%s), falling back to standalone",
+                        job["id"], platform_name, chat_id, e,
+                    )
 
         if not delivered:
             # Standalone path: run the async send in a fresh event loop (safe from any thread)

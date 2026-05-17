@@ -14756,11 +14756,18 @@ class GatewayRunner:
         def _status_callback_sync(event_type: str, message: str) -> None:
             if not _status_adapter or not _run_still_current():
                 return
+            _message_text = str(message or "")
+            if event_type == "lifecycle" and (
+                _message_text.startswith("⏳ Retrying in ")
+                or _message_text.startswith("⏱️ Rate limited. Waiting ")
+            ):
+                logger.debug("suppressing transient lifecycle status (%s): %s", event_type, _message_text)
+                return
             try:
                 _fut = asyncio.run_coroutine_threadsafe(
                     _status_adapter.send(
                         _status_chat_id,
-                        message,
+                        _message_text,
                         metadata=_status_thread_metadata,
                     ),
                     _loop_for_step,

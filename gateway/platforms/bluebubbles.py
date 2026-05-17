@@ -467,10 +467,10 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         text = self.format_message(content)
         if not text:
             return SendResult(success=False, error="BlueBubbles send requires text")
-        # Cherry/iMessage UX: allow the agent to write normal paragraphs, but
-        # collapse blank-line paragraph separators into single newlines before
-        # sending. This keeps one iMessage bubble while avoiding wall-of-text.
-        text = re.sub(r"\n\s*\n+", "\n", text).strip()
+        # Cherry/iMessage UX: preserve intentional blank-line paragraph spacing.
+        # BlueBubbles sends this as one payload; collapsing blank lines makes long
+        # iMessage replies look like a dense wall of text.
+        text = text.strip()
         chunks: List[str] = []
         if len(text) <= self.MAX_MESSAGE_LENGTH:
             chunks.append(text)

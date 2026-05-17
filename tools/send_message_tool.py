@@ -1689,7 +1689,13 @@ async def _send_bluebubbles(extra, chat_id, message):
         from gateway.config import PlatformConfig
         pconfig = PlatformConfig(extra=extra)
         adapter = BlueBubblesAdapter(pconfig)
-        connected = await adapter.connect()
+        # Outbound delivery must not start/register the inbound webhook. The
+        # gateway may already own 127.0.0.1:8645, and cron/send_message only
+        # need the BlueBubbles REST API to send text.
+        if hasattr(adapter, "connect_outbound_only"):
+            connected = await adapter.connect_outbound_only()
+        else:
+            connected = await adapter.connect()
         if not connected:
             return _error("BlueBubbles: failed to connect to server")
         try:
