@@ -53,8 +53,10 @@ _TAPBACK_REMOVED = {
     3003: "laugh", 3004: "emphasize", 3005: "question",
 }
 
-# Webhook event types that carry user messages
-_MESSAGE_EVENTS = {"new-message", "message", "updated-message"}
+# Webhook event types that carry user messages.
+# Ignore updated-message to avoid double replies for attachment messages: BlueBubbles
+# emits new-message first, then updated-message after attachment download completes.
+_MESSAGE_EVENTS = {"new-message", "message"}
 
 # Log redaction patterns
 _PHONE_RE = re.compile(r"\+?\d{7,15}")
@@ -123,6 +125,19 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         )
         if not str(self.webhook_path).startswith("/"):
             self.webhook_path = f"/{self.webhook_path}"
+        events = extra.get("webhook_events") or os.getenv(
+            "BLUEBUBBLES_WEBHOOK_EVENTS", "new-message"
+        )
+        if isinstance(events, str):
+            self.webhook_events = [
+                event.strip() for event in events.split(",") if event.strip()
+            ]
+        else:
+            self.webhook_events = [
+                str(event).strip() for event in events if str(event).strip()
+            ]
+        if not self.webhook_events:
+            self.webhook_events = ["new-message"]
         self.send_read_receipts = bool(extra.get("send_read_receipts", True))
         self.client: Optional[httpx.AsyncClient] = None
         self._runner = None
@@ -136,7 +151,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
 
     def _api_url(self, path: str) -> str:
         sep = "&" if "?" in path else "?"
-        return f"{self.server_url}{path}{sep}password={quote(self.password, safe='')}"
+        return f"{self.server_url}{path}{sep}password={quote(self.password, safe='=')}"
 
     async def _api_get(self, path: str) -> Dict[str, Any]:
         assert self.client is not None
@@ -207,9 +222,49 @@ class BlueBubblesAdapter(BasePlatformAdapter):
 
         return True
 
+    async def connect_outbound_only(self) -> bool:
+        """Connect to BlueBubbles for outbound sends without starting a webhook listener.
+
+        Standalone callers such as send_message/cron may run while the gateway already
+        owns the webhook port. They only need the REST API client for sending, so do
+        not bind aiohttp or register/unregister webhooks here.
+        """
+        if not self.server_url or not self.password:
+            logger.error(
+                "[bluebubbles] BLUEBUBBLES_SERVER_URL and BLUEBUBBLES_PASSWORD are required"
+            )
+            return False
+        from gateway.platforms._http_client_limits import platform_httpx_limits
+        self.client = httpx.AsyncClient(timeout=30.0, limits=platform_httpx_limits())
+        try:
+            await self._api_get("/api/v1/ping")
+            info = await self._api_get("/api/v1/server/info")
+            server_data = (info or {}).get("data", {})
+            self._private_api_enabled = bool(server_data.get("private_api"))
+            self._helper_connected = bool(server_data.get("helper_connected"))
+            logger.info(
+                "[bluebubbles] outbound-only connected to %s (private_api=%s, helper=%s)",
+                self.server_url,
+                self._private_api_enabled,
+                self._helper_connected,
+            )
+            self._mark_connected()
+            return True
+        except Exception as exc:
+            logger.error(
+                "[bluebubbles] cannot reach server at %s: %s", self.server_url, exc
+            )
+            if self.client:
+                await self.client.aclose()
+                self.client = None
+            return False
+
     async def disconnect(self) -> None:
-        # Unregister webhook before cleaning up
-        await self._unregister_webhook()
+        # Only unregister webhooks for the full gateway adapter that actually
+        # started the webhook listener. Outbound-only standalone senders must not
+        # remove the live gateway's registration.
+        if self._runner:
+            await self._unregister_webhook()
 
         if self.client:
             await self.client.aclose()
@@ -223,8 +278,8 @@ class BlueBubblesAdapter(BasePlatformAdapter):
     def _webhook_url(self) -> str:
         """Compute the external webhook URL for BlueBubbles registration."""
         host = self.webhook_host
-        if host in {"0.0.0.0", "127.0.0.1", "localhost", "::"}:
-            host = "localhost"
+        if host in {"0.0.0.0", "::"}:
+            host = "127.0.0.1"
         return f"http://{host}:{self.webhook_port}{self.webhook_path}"
 
     @property
@@ -239,7 +294,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         """
         base = self._webhook_url
         if self.password:
-            return f"{base}?password={quote(self.password, safe='')}"
+            return f"{base}?password={quote(self.password, safe='=')}"
         return base
 
     async def _find_registered_webhooks(self, url: str) -> list:
@@ -275,7 +330,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
 
         payload = {
             "url": webhook_url,
-            "events": ["new-message", "updated-message"],
+            "events": self.webhook_events,
         }
 
         try:
@@ -411,16 +466,15 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         text = self.format_message(content)
         if not text:
             return SendResult(success=False, error="BlueBubbles send requires text")
-        # Split on paragraph breaks first (double newlines) so each thought
-        # becomes its own iMessage bubble, then truncate any that are still
-        # too long.
-        paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
+        # Cherry/iMessage UX: allow the agent to write normal paragraphs, but
+        # collapse blank-line paragraph separators into single newlines before
+        # sending. This keeps one iMessage bubble while avoiding wall-of-text.
+        text = re.sub(r"\n\s*\n+", "\n", text).strip()
         chunks: List[str] = []
-        for para in (paragraphs or [text]):
-            if len(para) <= self.MAX_MESSAGE_LENGTH:
-                chunks.append(para)
-            else:
-                chunks.extend(self.truncate_message(para, max_length=self.MAX_MESSAGE_LENGTH))
+        if len(text) <= self.MAX_MESSAGE_LENGTH:
+            chunks.append(text)
+        else:
+            chunks.extend(self.truncate_message(text, max_length=self.MAX_MESSAGE_LENGTH))
         last = SendResult(success=True)
         for chunk in chunks:
             guid = await self._resolve_chat_guid(chat_id)
@@ -834,11 +888,30 @@ class BlueBubblesAdapter(BasePlatformAdapter):
 
         for att in attachments:
             att_guid = att.get("guid", "")
+            mime = (att.get("mimeType") or "").lower()
+            direct_url = (
+                att.get("url")
+                or att.get("downloadUrl")
+                or att.get("directUrl")
+            )
+            if direct_url:
+                media_urls.append(direct_url)
+                media_types.append(mime)
+                if mime.startswith("image/"):
+                    msg_type = MessageType.PHOTO
+                elif mime.startswith("audio/") or (att.get("uti") or "").endswith(
+                    "caf"
+                ):
+                    msg_type = MessageType.VOICE
+                elif mime.startswith("video/"):
+                    msg_type = MessageType.VIDEO
+                else:
+                    msg_type = MessageType.DOCUMENT
+                continue
             if not att_guid:
                 continue
             cached = await self._download_attachment(att_guid, att)
             if cached:
-                mime = (att.get("mimeType") or "").lower()
                 media_urls.append(cached)
                 media_types.append(mime)
                 if mime.startswith("image/"):
@@ -934,4 +1007,3 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             asyncio.create_task(self.mark_read(session_chat_id))
 
         return web.Response(text="ok")
-
